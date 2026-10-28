@@ -76,9 +76,9 @@ Resource Guru реалізовано за патерном Web-based Service-Ori
 
 ### 1.2.4. Порівняльний аналіз систем-аналогів
 
-Таблиця 1.1 — Порівняльний інженерний аналіз систем-аналогів та проєктованої підсистеми[cite: 1, 2]
+Таблиця 1.1 — Порівняльний інженерний аналіз систем-аналогів та проєктованої підсистеми
 
-| Інженерний критерій / Параметр[cite: 1, 2] | Timefold Solver (OptaPlanner Engine)[cite: 1, 2] | Salesforce Field Service (FSL Engine)[cite: 1, 2] | Resource Guru[cite: 1, 2] | Проєктована підсистема (Власний стек)[cite: 1, 2] |
+| Інженерний критерій / Параметр | Timefold Solver (OptaPlanner Engine) | Salesforce Field Service (FSL Engine) | Resource Guru | Проєктована підсистема (Власний стек) |
 | :--- | :--- | :--- | :--- | :--- |
 | **Тип архітектури та обчислювальний патерн** | Standalone / Embedded In-Memory Constraint Engine (JVM-based) | Multi-tenant SaaS Cloud Monolith + Asynchronous Batch Engine | Service-Oriented Web Application (Modular Monolith) | Distributed Event-Driven Architecture + Task-Worker Pattern (Worker Pool Isolation) |
 | **Протоколи міжсервісної комунікації та API** | gRPC (HTTP/2), REST API (OpenAPI/JSON), Async Messaging (Kafka/RabbitMQ) | REST/GraphQL API, Streaming API (CometD/Bayeux, Pub/Sub API via gRPC) | Synchronous REST API (HTTP/S), WebSockets / Long Polling | Asynchronous REST API (FastAPI + Pydantic v2), OpenAPI Contract-Driven, Server-Sent Events (SSE) |
@@ -96,3 +96,24 @@ Resource Guru реалізовано за патерном Web-based Service-Ori
 Обраний у межах кваліфікаційної роботи технологічний стек та архітектурні патерни ефективно ліквідують зазначені технічні вузькі місця. Застосування асинхронного фреймворку FastAPI у поєднанні з математичним розв'язувачем Google OR-Tools (CP-SAT Core) та його ізоляцією у dedicated воркер-пулі (Task-Worker Pattern через Taskiq та Redis) дозволяє відокремити CPU-інтенсивну оптимізацію від основного I/O-потоку Web API. Гарантія транзакційної цілісності та конкурентного захисту від колізій вирішується без важких блокувань на рівні реляційної алгебри СУБД PostgreSQL шляхом індексації темпоральних діапазонів (`tstzrange`) із використанням обмежень взаємного виключення (`EXCLUDE USING gist`). Усунення аномалій дуального запису (Dual-Write Problem) та забезпечення реактивної синхронізації графіків у режимі реального часу досягається реалізацією патерну Transactional Outbox у зв'язці з брокером Redis Pub/Sub та протоколом Server-Sent Events (SSE).
 
 Таким чином, пропонований інженерний підхід забезпечує баланс між високою обчислювальною точністю розв'язання NP-важкої задачі RCPSP та низькою часовою затримкою відгуку сервісу, гарантуючи розширюваність, відмовостійкість та надійність системи. Сформована концепція слугує алгоритмічною та технологічною основою для наступного етапу розробки — системного проєктування архітектури та специфікації міжсервісних контрактів у Розділі 2.
+
+---
+
+## 1.5. Модель To-Be, функціональні та нефункціональні вимоги
+
+### 1.5.1. Концептуальна модель To-Be
+У цільовій моделі (To-Be) кожна композитна послуга декомпозується на спрямований ациклічний граф (DAG) з активними та пасивними фазами. Ізоляція CPU-bound обчислень реалізується через воркер-пули (Taskiq/Redis), перевірка часових колізій виконується на рівні реляційної алгебри СУБД PostgreSQL (`tstzrange` + `EXCLUDE USING gist`), а реактивна трансляція мутацій забезпечується патерном Transactional Outbox у зв'язці з Redis Pub/Sub та Server-Sent Events (SSE).
+
+### 1.5.2. Перелік функціональних вимог (Core Features)
+* **Multi-Phase Process Decomposition:** Формалізація послуг у вигляді ациклічних графів (DAG) з активними та пасивними фазами.
+* **CP-SAT Optimization Core:** Синтез розкладів у Google OR-Tools за лексикографічним вектором критеріїв.
+* **Baseline Interval Engine:** Порівняльний аналізатор на основі інтервальних дерев (`portion`, `intervaltree`).
+* **Range-Level Concurrency Control:** Фіксація темпоральних діапазонів у PostgreSQL (`tstzrange` + `EXCLUDE USING gist`).
+* **Hold Lifecycle Manager:** Двоетапне бронювання з тимчасовим фіксуванням слотів ($N$ хвилин, TTL) через Taskiq.
+* **SSE Event Broadcaster:** Потокова трансляція мутацій розкладу підключеним клієнтам за патерном Transactional Outbox.
+* **Interactive Dispatcher Grid:** Багатодоріжковий таймлайн із підтримкою Drag-and-Drop та автоперерахунком залежностей.
+
+### 1.5.3. Нефункціональні вимоги (NFRs)
+* **Продуктивність:** REST API $Latency \le 100$ мс ($p_{95}$) при 500 RPS; CP-SAT Solver $Latency \le 1000$ мс ($p_{95}$).
+* **Безпека:** JWT RS256 (OAuth 2.0 / OIDC), PII-знеособлення (GDPR, UUID у CP-SAT), відповідність OWASP Top-10.
+* **Надійність:** $0\%$ подвійних бронювань (Phantom Bookings), At-least-once доставка подій через Transactional Outbox, мультиконтейнерний контур Docker Compose, автоматизація CI/CD (`Hypothesis`, `testcontainers-python`, `k6`, `mypy` strict mode).
