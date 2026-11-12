@@ -26,3 +26,10 @@
 | **Real-time Event Streaming** | Атомарна трансляція подій мутації розкладу | Transactional Outbox Pattern + Redis Pub/Sub + SSE |
 | **Security & Privacy** | OAuth 2.0 / OIDC (JWT RS256), PII-знеособлення (GDPR) | FastAPI Security, UUID-деперсоналізація в CP-SAT |
 | **Quality Engineering** | $100\%$ покриття інваріантів алгоритму тестами | Property-based testing (`Hypothesis`), `testcontainers` |
+
+## Навігація інженерною документацією
+
+* [Специфікація вимог до ПЗ (SRS — ISO/IEC/IEEE 29148)](./src.md)
+* [Розділ 2: Архітектурне проєктування (C4 Model Levels 1–3)](./2_design.md)
+* [Журнал архітектурних рішень (ADR)](./adr/)
+  * [ADR-001: Вибір механізму контролю конкурентного доступу (PostgreSQL GiST vs Redis Redlock)](./adr/0001-choice-of-technology.md)
