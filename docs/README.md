@@ -6,16 +6,16 @@
 
 ---
 
-##  Робочий контур документації
+## Робочий контур документації
 
-* **Хмарний робочий файл Розділу 1 (Google Docs):** [F2_Diploma_Chapter1_Shostak (Режим коментування)](https://docs.google.com/document/d/1hMwIJXCw0ZT-kP-8Pf7YQW8NmCeXGNGTXLlkAFiOemY/edit?usp=sharing)
-* **Структура Markdown-документації:**
-  * [`/docs/0_intro.md`](./0_intro.md) — Вступ, науковий апарат, актуальність та об'єкт/предмет дослідження.
-  * [`/docs/1_analysis.md`](./1_analysis.md) — Аналіз предметної області, огляд аналогів, модель As-Is/To-Be, функціональні та нефункціональні вимоги (Core Features & NFRs).
+- **Хмарний робочий файл Розділу 1 (Google Docs):** [F2_Diploma_Chapter1_Shostak (Режим коментування)](https://docs.google.com/document/d/1hMwIJXCw0ZT-kP-8Pf7YQW8NmCeXGNGTXLlkAFiOemY/edit?usp=sharing)
+- **Структура Markdown-документації:**
+  - [`/docs/0_intro.md`](./0_intro.md) — Вступ, науковий апарат, актуальність та об'єкт/предмет дослідження.
+  - [`/docs/1_analysis.md`](./1_analysis.md) — Аналіз предметної області, огляд аналогів, модель As-Is/To-Be, функціональні та нефункціональні вимоги (Core Features & NFRs).
 
 ---
 
-##  Зведена матриця нефункціональних вимог (NFRs Summary Matrix)
+## Зведена матриця нефункціональних вимог (NFRs Summary Matrix)
 
 | Категорія NFR | Ключова інженерна метрика / Індикатор | Технологічне забезпечення (Tech Stack) |
 | :--- | :--- | :--- |
@@ -27,16 +27,16 @@
 | **Security & Privacy** | OAuth 2.0 / OIDC (JWT RS256), PII-знеособлення (GDPR) | FastAPI Security, UUID-деперсоналізація в CP-SAT |
 | **Quality Engineering** | $100\%$ покриття інваріантів алгоритму тестами | Property-based testing (`Hypothesis`), `testcontainers` |
 
+## Навігація інженерною документацією
 
-  ## Навігація інженерною документацією
-
-* [Специфікація вимог до ПЗ (SRS — ISO/IEC/IEEE 29148)](./srs.md)
-* [Розділ 2: Архітектурне проєктування, моделі даних та алгоритми](./2_design.md)
-  * [2.1–2.2. Архітектура C4 Model (Levels 1–3)](./2_design.md#diagram-level1)
-  * [2.4. Логіко-фізична модель даних PostgreSQL 16+ (ERD)](./2_design.md#database-design)
-  * [2.5. Специфікація міжсервісних контрактів (API)](./2_design.md#api-contracts)
-  * [2.6. Алгоритми критичних вузлів системи](./2_design.md#critical-algorithms)
-  * [2.7. Інтеграційний аудит (Production Readiness Report)](./2_design.md#integration-audit)
-* [Специфікації API-контрактів (OpenAPI 3.0.3)](./api/openapi.yaml)
-* [Журнал архітектурних рішень (ADR)](./adr/)
-  * [ADR-001: Вибір механізму контролю конкурентного доступу (PostgreSQL GiST vs Redis Redlock)](./adr/0001-choice-of-technology.md)
+- [Специфікація вимог до ПЗ (SRS — ISO/IEC/IEEE 29148)](./srs.md)
+- [Розділ 2: Архітектурне проєктування, моделі даних та алгоритми](./2_design.md)
+  - [2.1–2.2. Архітектура C4 Model (Levels 1–3)](./2_design.md#diagram-level1)
+  - [2.4. Логіко-фізична модель даних PostgreSQL 16+ (ERD)](./2_design.md#database-design)
+  - [2.5. Специфікація міжсервісних контрактів (API)](./2_design.md#api-contracts)
+  - [2.6. Алгоритми критичних вузлів системи](./2_design.md#critical-algorithms)
+  - [2.7. Інтеграційний аудит (Production Readiness Report)](./2_design.md#integration-audit)
+- [Специфікації API-контрактів (OpenAPI 3.0.3)](./api/openapi.yaml)
+- [Журнал архітектурних рішень (ADR)](./adr/)
+  - [ADR-001: Вибір механізму контролю конкурентного доступу (PostgreSQL GiST vs Redis Redlock)](./adr/0001-choice-of-technology.md)
+  
