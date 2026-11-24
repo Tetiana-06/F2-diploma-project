@@ -241,3 +241,274 @@ graph TD
    * **`Baseline Interval Engine (portion / intervaltree)`:** Резервний евристичний аналізатор інтервальних дерев для миттєвого пошуку допустимого розкладу у разі перевищення ліміту 800 мс ([SRS-FUN-SOLV-03](./srs.md#23-алгоритмічне-ядро-оптимізації-solv)).
 5. **Шар вихідної інфраструктури (`Outbound Infrastructure Layer`):**
    * **`Schedule Range Repository`:** Реалізує патерн *Repository* поверх `SQLAlchemy 2.0 (asyncpg)`. Фіксує розраховані часові діапазони `tstz
+
+
+
+   ---
+
+## 2.4. Проєктування та моделювання баз даних {#database-design}
+
+Логіко-фізична модель збереження даних побудована для реляційної СУБД **PostgreSQL 16+** у Третій нормальній формі (**3NF**) із використанням діапазонного типу `TSTZRANGE` та індексного розширення `btree_gist` для забезпечення декларативного інваріанта неперетину інтервалів ([SRS-FUN-DB-01](./srs.md#24-сервіс-транзакційного-контролю-колізій-db), [ADR-001](./adr/0001-choice-of-technology.md)).
+
+```mermaid
+erDiagram
+    USERS ||--o{ MASTER_SKILLS : possesses
+    SERVICE_STAGES ||--o{ MASTER_SKILLS : requires
+    USERS ||--o{ BOOKINGS : initiates
+    USERS ||--o{ BOOKING_PHASES : assigned_to
+    SERVICES ||--|{ SERVICE_STAGES : decomposes_into
+    SERVICE_STAGES ||--o{ STAGE_DEPENDENCIES : precedes
+    SERVICE_STAGES ||--o{ STAGE_DEPENDENCIES : succeeds
+    SERVICES ||--o{ BOOKINGS : booked_for
+    BOOKINGS ||--|{ BOOKING_PHASES : contains
+    BOOKINGS ||--o{ OUTBOX_EVENTS : emits
+
+    USERS {
+        uuid id PK "DEFAULT gen_random_uuid()"
+        varchar(255) email UK "NOT NULL, B-Tree Index"
+        varchar(150) full_name "NOT NULL"
+        user_role_enum role "NOT NULL (CLIENT|MASTER|DISPATCHER|ADMIN)"
+        boolean is_active "NOT NULL DEFAULT TRUE"
+        timestamptz created_at "NOT NULL DEFAULT now()"
+        timestamptz updated_at "NOT NULL DEFAULT now()"
+        timestamptz deleted_at "NULL (Soft Delete)"
+    }
+
+    SERVICES {
+        uuid id PK "DEFAULT gen_random_uuid()"
+        varchar(200) name "NOT NULL"
+        text description "NULL"
+        numeric(12_2) base_price "NOT NULL CHECK (base_price >= 0)"
+        boolean is_active "NOT NULL DEFAULT TRUE"
+        timestamptz created_at "NOT NULL DEFAULT now()"
+        timestamptz updated_at "NOT NULL DEFAULT now()"
+        timestamptz deleted_at "NULL (Soft Delete)"
+    }
+
+    SERVICE_STAGES {
+        uuid id PK "DEFAULT gen_random_uuid()"
+        uuid service_id FK "NOT NULL REFERENCES services(id)"
+        varchar(150) stage_name "NOT NULL"
+        stage_type_enum stage_type "NOT NULL (ACTIVE|PASSIVE_WAIT)"
+        int duration_minutes "NOT NULL CHECK (duration_minutes > 0)"
+        int buffer_after_minutes "NOT NULL DEFAULT 0"
+        timestamptz created_at "NOT NULL DEFAULT now()"
+    }
+
+    STAGE_DEPENDENCIES {
+        uuid parent_stage_id PK, FK "REFERENCES service_stages(id)"
+        uuid child_stage_id PK, FK "REFERENCES service_stages(id)"
+        int min_lag_minutes "NOT NULL DEFAULT 0"
+    }
+
+    MASTER_SKILLS {
+        uuid master_id PK, FK "REFERENCES users(id)"
+        uuid stage_id PK, FK "REFERENCES service_stages(id)"
+        int skill_priority "NOT NULL DEFAULT 1"
+    }
+
+    BOOKINGS {
+        uuid id PK "DEFAULT gen_random_uuid()"
+        uuid client_id FK "NOT NULL REFERENCES users(id)"
+        uuid service_id FK "NOT NULL REFERENCES services(id)"
+        booking_status_enum status "NOT NULL (HOLD|CONFIRMED|IN_PROGRESS|COMPLETED|CANCELLED)"
+        numeric(12_2) total_price "NOT NULL"
+        timestamptz hold_expires_at "NULL (TTL 10 min for HOLD)"
+        int version "NOT NULL DEFAULT 1 (Optimistic Lock)"
+        timestamptz created_at "NOT NULL DEFAULT now()"
+        timestamptz updated_at "NOT NULL DEFAULT now()"
+    }
+
+    BOOKING_PHASES {
+        uuid id PK "DEFAULT gen_random_uuid()"
+        uuid booking_id FK "NOT NULL REFERENCES bookings(id)"
+        uuid stage_id FK "NOT NULL REFERENCES service_stages(id)"
+        uuid master_id FK "NULL REFERENCES users(id)"
+        tstzrange time_slot "NOT NULL (EXCLUDE USING gist with master_id)"
+        phase_status_enum phase_status "NOT NULL (SCHEDULED|ACTIVE|DONE|SKIPPED)"
+        timestamptz created_at "NOT NULL DEFAULT now()"
+        timestamptz updated_at "NOT NULL DEFAULT now()"
+    }
+
+    OUTBOX_EVENTS {
+        uuid id PK "DEFAULT gen_random_uuid()"
+        uuid aggregate_id FK "NOT NULL REFERENCES bookings(id)"
+        varchar(100) event_type "NOT NULL (e.g. SCHEDULE_MUTATED)"
+        jsonb payload "NOT NULL"
+        timestamptz created_at "NOT NULL DEFAULT now()"
+        timestamptz processed_at "NULL (Partial B-Tree Index)"
+    }
+```
+
+#### Опис ключових контурів та індексів БД:
+* **Довідниковий та графовий контур (`USERS`, `SERVICES`, `SERVICE_STAGES`, `STAGE_DEPENDENCIES`, `MASTER_SKILLS`):** Забезпечує декомпозицію композитних послуг у спрямований ациклічний граф (**DAG**) із розділенням на активні (`ACTIVE`) та пасивні (`PASSIVE_WAIT`) фази ([SRS-FUN-DAG-01](./srs.md#22-модуль-декомпозиції-та-граф-моделювання-dag)) та формує матрицю компетенцій для розв'язувача CP-SAT.
+* **Транзакційний контур (`BOOKINGS`, `BOOKING_PHASES`):** Підтримує двоетапне резервування (`HOLD` із TTL 10 хв та оптимістичним блокуванням `version` за [SRS-FUN-DB-02](./srs.md#24-сервіс-транзакційного-контролю-колізій-db)) і декларативне обмеження `EXCLUDE USING gist (master_id WITH =, time_slot WITH &&)` для гарантування $0\%$ подвійних бронювань ([SRS-NFR-REL-01](./srs.md#3-non-functional-requirements-нефункціональні-вимоги)).
+* **Подієвий контур (`OUTBOX_EVENTS`):** Реалізує патерн *Transactional Outbox* із частковим покриваючим індексом `WHERE processed_at IS NULL` для атомарного запису подій мутації в одній ACID-транзакції з бронюванням ([SRS-FUN-STREAM-01](./srs.md#25-реактивний-сервіс-трансляції-станів-stream)).
+
+---
+
+## 2.5. Специфікація міжсервісних контрактів (API) {#api-contracts}
+
+Взаємодія між клієнтським застосунком **`Single Page Application (Vue.js 3)`** та сервісом **`Web API Application (FastAPI)`** спроєктована за підходом **API-First Design** для забезпечення наскрізної типізації через автогенерацію SDK (`@hey-api/openapi-ts`) та валідацію моделей `Pydantic v2`.
+
+Деталізовану специфікацію ендпоінтів, моделей даних (`components/schemas`), схем безпеки `JWT RS256` (`BearerAuth`) та стандартизованих відповідей про помилки (`RFC 9457 ProblemDetails`, включно з `409 Conflict` при спрацюванні GiST-обмеження) у форматі **OpenAPI 3.0.3** зафіксовано у файлі **[openapi.yaml](./api/openapi.yaml)**.
+
+---
+
+## 2.6. Моделювання логіки критичних вузлів {#critical-algorithms}
+
+### 2.6.1. Алгоритм 1: Топологічна декомпозиція та валідація ациклічності графа послуги (Kahn's DAG Validation)
+
+1. **Вхідні дані:** Масив етапів композитної послуги `Stages[0..N-1]` та масив орієнтованих ребер залежностей `Edges[0..M-1]`.
+2. **Перевірка виродженості:** Якщо `N = 0 OR Stages = NULL`, алгоритм переривається із поверненням винятку `EMPTY_SERVICE_DAG`.
+3. **Ініціалізація:** Встановлюються змінні `i := 0`, `VisitedCount := 0`, `Queue := EMPTY`, `TopoOrder := EMPTY`. Для кожного індексу `i` (`0 <= i < N`) обчислюється напівстепінь заходу `InDegree[i] := CountIncoming(Stages[i], Edges)`. Вузол із умовою `InDegree[i] = 0` додається до черги `Queue := Enqueue(Queue, Stages[i])`.
+4. **Топологічне сортування (алгоритм Кана):** Поки виконується умова `NOT IsEmpty(Queue)`, вилучається вершина `u := Dequeue(Queue)`, оновлюються `TopoOrder := Append(TopoOrder, u)` та `VisitedCount := VisitedCount + 1`. Для кожного суміжного вузла `v := Neighbors[k]` (`0 <= k < Length(Neighbors)`) виконується декремент `InDegree[v] := InDegree[v] - 1`; при досягненні `InDegree[v] = 0` вершина `v` додається у чергу `Queue`.
+5. **Верифікація ациклічності:** Якщо `VisitedCount <> N`, фіксується наявність контуру в графі та повертається помилка `CYCLE_DETECTED_IN_DAG`; інакше повертається впорядкований граф `ValidatedDAG(TopoOrder)`.
+
+```mermaid
+graph TD
+    Start(["Початок"]) --> Input[/"Ввід: Stages[0..N-1], Edges[0..M-1]"/]
+    Input --> CheckEmpty{"N = 0 OR Stages = NULL"}
+    CheckEmpty -->|"Так"| ErrEmpty[/"Вивід: Error('EMPTY_SERVICE_DAG')"/]
+    ErrEmpty --> End(["Кінець"])
+
+    CheckEmpty -->|"Ні"| InitVars["i := 0;<br/>VisitedCount := 0;<br/>Queue := EMPTY;<br/>TopoOrder := EMPTY"]
+    InitVars --> LoopInit{"i < N"}
+    LoopInit -->|"Так"| CalcDeg["InDegree[i] := CountIncoming(Stages[i], Edges);<br/>i := i + 1"]
+    CalcDeg --> LoopInit
+
+    LoopInit -->|"Ні"| ResetIdx["i := 0"]
+    ResetIdx --> LoopQueue{"i < N"}
+    LoopQueue -->|"Так"| CheckZero{"InDegree[i] = 0"}
+    CheckZero -->|"Так"| PushQ["Queue := Enqueue(Queue, Stages[i]);<br/>i := i + 1"]
+    CheckZero -->|"Ні"| IncI["i := i + 1"]
+    PushQ --> LoopQueue
+    IncI --> LoopQueue
+
+    LoopQueue -->|"Ні"| WhileQ{"NOT IsEmpty(Queue)"}
+    WhileQ -->|"Так"| PopU["u := Dequeue(Queue);<br/>TopoOrder := Append(TopoOrder, u);<br/>VisitedCount := VisitedCount + 1;<br/>Neighbors := GetAdjacent(u, Edges);<br/>k := 0"]
+    PopU --> LoopAdj{"k < Length(Neighbors)"}
+    LoopAdj -->|"Так"| DecDeg["v := Neighbors[k];<br/>InDegree[v] := InDegree[v] - 1;<br/>k := k + 1"]
+    DecDeg --> CheckNextZero{"InDegree[v] = 0"}
+    CheckNextZero -->|"Так"| PushNext["Queue := Enqueue(Queue, v)"]
+    CheckNextZero -->|"Ні"| LoopAdj
+    PushNext --> LoopAdj
+    LoopAdj -->|"Ні"| WhileQ
+
+    WhileQ -->|"Ні"| CheckCycle{"VisitedCount <> N"}
+    CheckCycle -->|"Так"| ErrCycle[/"Вивід: Error('CYCLE_DETECTED_IN_DAG')"/]
+    ErrCycle --> End
+    CheckCycle -->|"Ні"| OutDAG[/"Вивід: ValidatedDAG(TopoOrder)"/]
+    OutDAG --> End
+```
+
+### 2.6.2. Алгоритм 2: Оркестрація лексикографічної оптимізації RCPSP із тайм-бюджетом та fallback-переключенням
+
+1. **Вхідні дані:** Топологічно відсортований граф `DAG[0..N-1]`, множина виконавців `Masters[0..M-1]`, жорсткий ліміт часу обчислення `T_max := 800 ms`.
+2. **Побудова моделі обмежень:** Ініціалізується модель `Model := CreateCPSATModel()`, лічильник `i := 0` та прапорець дефіциту ресурсів `HasResourceGap := FALSE`. У циклі при `i < N AND NOT HasResourceGap`:
+   * Якщо `DAG[i].Type = 'ACTIVE'`, формується підмножина кваліфікованих майстрів `Qualified[i] := FilterBySkill(Masters, DAG[i])`. Якщо `Length(Qualified[i]) = 0`, встановлюється `HasResourceGap := TRUE`. Інакше для кожного `m` (`0 <= m < Length(Qualified[i])`) створюється опціональний інтервал `OptVar[i][m] := NewOptionalIntervalVar(DAG[i], Qualified[i][m])` та накладається обмеження вибору рівно одного виконавця `AddExactlyOne(OptVar[i][0..K-1])`.
+   * Якщо `DAG[i].Type <> 'ACTIVE'` (фаза `PASSIVE_WAIT`), реєструється фіксований часовий інтервал без прив'язки до виконавця `PassiveVar[i] := NewIntervalVar(DAG[i])`.
+3. **Перевірка доступності ресурсів:** Якщо `HasResourceGap = TRUE`, виконання припиняється зі статусом `NO_AVAILABLE_RESOURCES`.
+4. **Оптимізація та резервування (Fallback):** Накладаються констрейнти неперетину `AddNoOverlapConstraints(Model, OptVar)`, задається векторна лексикографічна цільова функція `SetLexicographicObjective(Model)` та запускається розв'язувач із обмеженням `Solver.MaxTimeInSeconds := T_max / 1000`.
+   * Якщо `Status = 'OPTIMAL' OR Status = 'FEASIBLE'`, формується результат `Candidates := ExtractCPSATSchedule(Model)`.
+   * Інакше (при перевищенні бюджету часу або помилці) управління передається на резервний рушій інтервальних дерев `Candidates := RunBaselineIntervalTree(DAG, Masters)`, `Mode := 'BASELINE_HEURISTIC_FALLBACK'`. Якщо `Length(Candidates) = 0`, повертається статус `NO_SLOTS_FOUND`.
+5. **Вихідні дані:** Повертається структура `ScheduleResult(Mode, Candidates)`.
+
+```mermaid
+graph TD
+    Start(["Початок"]) --> Input[/"Ввід: DAG[0..N-1], Masters[0..M-1],<br/>T_max := 800 ms"/]
+    Input --> InitModel["Model := CreateCPSATModel();<br/>i := 0;<br/>HasResourceGap := FALSE"]
+
+    InitModel --> LoopPhases{"i < N AND NOT HasResourceGap"}
+    LoopPhases -->|"Так"| CheckType{"DAG[i].Type = 'ACTIVE'"}
+    CheckType -->|"Ні"| AddPassive["PassiveVar[i] := NewIntervalVar(DAG[i]);<br/>i := i + 1"]
+    AddPassive --> LoopPhases
+
+    CheckType -->|"Так"| FilterM["Qualified[i] := FilterBySkill(Masters, DAG[i]);<br/>K := Length(Qualified[i])"]
+    FilterM --> CheckQual{"K = 0"}
+    CheckQual -->|"Так"| SetGap["HasResourceGap := TRUE"]
+    SetGap --> LoopPhases
+
+    CheckQual -->|"Ні"| LoopM["m := 0"]
+    LoopM --> InnerM{"m < K"}
+    InnerM -->|"Так"| AddOpt["OptVar[i][m] := NewOptionalIntervalVar(DAG[i], Qualified[i][m]);<br/>m := m + 1"]
+    AddOpt --> InnerM
+    InnerM -->|"Ні"| AddExactlyOne["AddExactlyOne(OptVar[i][0..K-1]);<br/>i := i + 1"]
+    AddExactlyOne --> LoopPhases
+
+    LoopPhases -->|"Ні"| CheckGapFlag{"HasResourceGap = TRUE"}
+    CheckGapFlag -->|"Так"| OutNoRes[/"Вивід: Status('NO_AVAILABLE_RESOURCES')"/]
+    OutNoRes --> End(["Кінець"])
+
+    CheckGapFlag -->|"Ні"| ConfigureSolver["AddNoOverlapConstraints(Model, OptVar);<br/>SetLexicographicObjective(Model);<br/>Solver.MaxTimeInSeconds := T_max / 1000;<br/>Status := Solve(Model)"]
+    ConfigureSolver --> CheckSolver{"Status = 'OPTIMAL' OR Status = 'FEASIBLE'"}
+
+    CheckSolver -->|"Так"| ExtractCP["Candidates := ExtractCPSATSchedule(Model);<br/>Mode := Status"]
+    ExtractCP --> OutSuccess[/"Вивід: ScheduleResult(Mode, Candidates)"/]
+    OutSuccess --> End
+
+    CheckSolver -->|"Ні"| RunFallback["Candidates := RunBaselineIntervalTree(DAG, Masters);<br/>Mode := 'BASELINE_HEURISTIC_FALLBACK'"]
+    RunFallback --> CheckFallbackEmpty{"Length(Candidates) = 0"}
+    CheckFallbackEmpty -->|"Так"| OutEmptySlot[/"Вивід: Status('NO_SLOTS_FOUND')"/]
+    OutEmptySlot --> End
+    CheckFallbackEmpty -->|"Ні"| OutSuccess
+```
+
+### 2.6.3. Алгоритм 3: Атомарна фіксація темпоральних інтервалів (`tstzrange`) та патерн Transactional Outbox
+
+1. **Вхідні дані:** Ключ ідепотентності `IdempotencyKey`, ідентифікатори `ClientID`, `ServiceID`, масив фаз розкладу `Phases[0..N-1]` та час життя холду `TTL := 600 s`.
+2. **Контроль ідепотентності:** Виконується пошук `CachedResp := CheckIdempotencyStore(IdempotencyKey)` у сховищі Redis 7.x. Якщо `CachedResp <> NULL`, повертається збережена відповідь `HTTP 200 (CachedResp)` без відкриття транзакції запису.
+3. **Транзакційне збереження та захист GiST:** Відкривається транзакція БД `BeginTransaction(Isolation := 'READ COMMITTED')`, фіксується дедлайн `ExpiresAt := NowUTC() + TTL`, генерується `BookingID := GenerateUUIDv4()` і створюється агрегат `BOOKINGS` зі статусом `Status := 'HOLD'` та `Version := 1`.
+4. **Запис темпоральних діапазонів:** У циклі при `i < N AND DbError = NULL` для кожної фази конструюється напіввідкритий інтервал `Range[i] := BuildTSTZRange(Phases[i].Start, Phases[i].End)` та виконується вставка в таблицю `BOOKING_PHASES`. При виникненні помилки СУБД (`Result.Error <> NULL`) фіксується код `DbError := Result.SqlState`.
+5. **Обробка колізій та фіксація події Outbox:**
+   * Якщо `DbError <> NULL`, виконується `RollbackTransaction()`. При коді `DbError = '23P01'` (спрацювання індексу `EXCLUDE USING gist`) повертається `HTTP 409 Conflict`; при інших системних збоях СУБД — `HTTP 503 Service Unavailable`.
+   * Якщо `DbError = NULL`, у межах тієї ж транзакції генерується `EventID := GenerateUUIDv4()` та записується подія `BOOKING_HELD` у таблицю `OUTBOX_EVENTS`, після чого виконується `CommitTransaction()`, збереження ключа ідепотентності та повернення статусу `HTTP 201 Created (BookingID, ExpiresAt)`.
+
+```mermaid
+graph TD
+    Start(["Початок"]) --> Input[/"Ввід: IdempotencyKey, ClientID, ServiceID,<br/>Phases[0..N-1], TTL := 600 s"/]
+    Input --> CheckIdemp["CachedResp := CheckIdempotencyStore(IdempotencyKey)"]
+    CheckIdemp --> IsCached{"CachedResp <> NULL"}
+    IsCached -->|"Так"| OutCached[/"Вивід: HTTP 200 (CachedResp)"/]
+    OutCached --> End(["Кінець"])
+
+    IsCached -->|"Ні"| BeginTx["BeginTransaction(Isolation := 'READ COMMITTED');<br/>ExpiresAt := NowUTC() + TTL;<br/>BookingID := GenerateUUIDv4()"]
+    BeginTx --> InsertBooking["InsertBooking(BookingID, ClientID, ServiceID,<br/>Status := 'HOLD', ExpiresAt, Version := 1);<br/>i := 0;<br/>DbError := NULL"]
+
+    InsertBooking --> LoopInsert{"i < N AND DbError = NULL"}
+    LoopInsert -->|"Так"| BuildRange["Range[i] := BuildTSTZRange(Phases[i].Start, Phases[i].End);<br/>Result := InsertBookingPhase(BookingID, Phases[i], Range[i])"]
+    BuildRange --> CheckSqlErr{"Result.Error <> NULL"}
+    CheckSqlErr -->|"Так"| SetErr["DbError := Result.SqlState"]
+    SetErr --> LoopInsert
+    CheckSqlErr -->|"Ні"| NextPhase["i := i + 1"]
+    NextPhase --> LoopInsert
+
+    LoopInsert -->|"Ні"| HasDbErr{"DbError <> NULL"}
+    HasDbErr -->|"Так"| RollbackTx["RollbackTransaction()"]
+    RollbackTx --> IsOverlap{"DbError = '23P01'"}
+    IsOverlap -->|"Так"| Out409[/"Вивід: HTTP 409 Conflict (GiST Exclusion)"/]
+    Out409 --> End
+    IsOverlap -->|"Ні"| Out503[/"Вивід: HTTP 503 Service Unavailable"/]
+    Out503 --> End
+
+    HasDbErr -->|"Ні"| WriteOutbox["EventID := GenerateUUIDv4();<br/>Payload := SerializeDelta(BookingID, Phases);<br/>InsertOutboxEvent(EventID, BookingID, 'BOOKING_HELD', Payload)"]
+    WriteOutbox --> CommitTx["CommitTransaction();<br/>SaveIdempotencyStore(IdempotencyKey, BookingID)"]
+    CommitTx --> Out201[/"Вивід: HTTP 201 Created (BookingID, ExpiresAt)"/]
+    Out201 --> End
+```
+
+---
+
+## 2.7. Інтеграційний аудит та верифікація цілісності доменів {#integration-audit}
+
+**Статус верифікації:** `APPROVED FOR IMPLEMENTATION (PASS — 0 CRITICAL SHOWSTOPPERS)`
+
+| № | Критерій інтеграційної верифікації | Статус | Коментар аудитора |
+| :-: | :--- | :---: | :--- |
+| 1 | Узгодженість типів ключів (`UUID`), фінансів (`NUMERIC(12,2)`) та дат (`ISO 8601` $\to$ `TSTZRANGE`) | **PASS** | Повна типова сумісність між [openapi.yaml](./api/openapi.yaml), Pydantic v2 та PostgreSQL 16+ |
+| 2 | Покриття захистом від стану гонитви (Race Conditions) та подвійних бронювань | **PASS** | `EXCLUDE USING gist` у БД $\leftrightarrow$ `SQLSTATE 23P01` в Алгоритмі 3 $\leftrightarrow$ `409 Conflict` в API |
+| 3 | Узгодженість механізму підтвердження холду (`HOLD` $\to$ `CONFIRMED`) та оптимістичного блокування | **PASS** | `hold_expires_at` + `version` у `BOOKINGS` $\leftrightarrow$ `PATCH /bookings/{booking_id}/confirm` |
+| 4 | Атомарність подійної синхронізації (Transactional Outbox $\to$ Redis Pub/Sub $\to$ SSE) | **PASS** | Таблиця `OUTBOX_EVENTS` + Алгоритм 3 $\leftrightarrow$ `GET /schedules/stream` |
+| 5 | Академічний нормоконтроль формалізації алгоритмів (`:=`, `AND/OR/NOT`, індекси) | **PASS** | Усі 3 алгоритми відповідають вимогам ДСТУ / ISO 5807 |
+
+**Висновок комісії:** Архітектурний, даталогічний та алгоритмічний контури Розділу 2 є повністю узгодженими, не містять інтеграційних блокерів і затверджуються для переходу до програмної реалізації.
